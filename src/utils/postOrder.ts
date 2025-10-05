@@ -4,6 +4,7 @@ import { getUserActivityModel } from '../models/userHistory';
 import { ENV } from '../config/env';
 
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
+const COPY_RATIO = ENV.COPY_RATIO;
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 
@@ -11,12 +12,8 @@ const postOrder = async (
     clobClient: ClobClient,
     condition: string,
     my_position: UserPositionInterface | undefined,
-    user_position: UserPositionInterface | undefined,
-    trade: UserActivityInterface,
-    my_balance: number,
-    user_balance: number
+    trade: UserActivityInterface
 ) => {
-    //Merge strategy
     if (condition === 'merge') {
         console.log('Merging Strategy...');
         if (!my_position) {
@@ -72,11 +69,17 @@ const postOrder = async (
         } else {
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
         }
-    } else if (condition === 'buy') {       //Buy strategy
+    } else if (condition === 'buy') { 
         console.log('Buy Strategy...');
-        const ratio = my_balance / (user_balance + trade.usdcSize);
-        console.log('ratio', ratio);
-        let remaining = trade.usdcSize * ratio;
+        console.log('Copy ratio:', COPY_RATIO);
+        let remaining = trade.usdcSize * COPY_RATIO;
+
+        if (remaining < 1) {
+            console.log(`Order size too small ($${remaining.toFixed(2)}), min size: $1 - skipping`);
+            await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+            return;
+        }
+
         let retry = 0;
         while (remaining > 0 && retry < RETRY_LIMIT) {
             const orderBook = await clobClient.getOrderBook(trade.asset);
@@ -129,18 +132,21 @@ const postOrder = async (
         } else {
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
         }
-    } else if (condition === 'sell') {          //Sell strategy
+    } else if (condition === 'sell') { 
         console.log('Sell Strategy...');
+        console.log('Copy ratio:', COPY_RATIO);
         let remaining = 0;
         if (!my_position) {
             console.log('No position to sell');
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
-        } else if (!user_position) {
-            remaining = my_position.size;
         } else {
-            const ratio = trade.size / (user_position.size + trade.size);
-            console.log('ratio', ratio);
-            remaining = my_position.size * ratio;
+            remaining = trade.size * COPY_RATIO;
+            const estimatedValue = remaining * trade.price;
+            if (estimatedValue < 1) {
+                console.log(`Order value too small ($${estimatedValue.toFixed(2)}), min size: $1 - skipping`);
+                await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+                return;
+            }
         }
         let retry = 0;
         while (remaining > 0 && retry < RETRY_LIMIT) {
